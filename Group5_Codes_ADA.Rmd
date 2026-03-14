@@ -1,0 +1,496 @@
+---
+title: "Impact of Enhanced Seasonal Malaria Chemoprevention on Hemoglobin Trajectories in Children: A Randomized Controlled Trial Analysis"
+author: 
+  - name: "Applied Data Analysis Consulting Group"
+    affiliation: "African Institute for Mathematical Sciences — Rwanda"
+date: today
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    fig-width: 8
+    fig-height: 5
+    self-contained: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup, include=FALSE}
+# Libraries 
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(kableExtra)
+library(broom.mixed)
+library(patchwork)
+library(ggplot2)
+
+# Load & prepare data
+dat <- read.csv("malaria_anemia_rct.csv")
+
+dat <- dat %>%
+  mutate(
+    treatment_f = factor(treatment, levels = c(0, 1),
+                         labels = c("Standard SMC", "Enhanced SMC")),
+    itn_use_f   = factor(itn_use, levels = c(0, 1),
+                         labels = c("Inconsistent", "Consistent")),
+    child_id    = factor(child_id)
+  )
+
+
+trt_colors <- c("Standard SMC" = "#E74C3C", "Enhanced SMC" = "#2ECC71")
+```
+
+---
+
+# Exploratory Data Analysis
+
+## Dataset Overview
+
+```{r data-overview}
+# Basic counts 
+n_children <- length(unique(dat$child_id))
+n_obs      <- nrow(dat)
+n_miss     <- sum(is.na(dat))
+
+tibble(
+  Characteristic = c(
+    "Total observations", "Number of children",
+    "Time points (months)", "Missing values",
+    "Standard SMC (n children)", "Enhanced SMC (n children)"
+  ),
+  Value = c(
+    n_obs, n_children,
+    paste(sort(unique(dat$month)), collapse = ", "),
+    n_miss,
+    length(unique(dat$child_id[dat$treatment == 0])),
+    length(unique(dat$child_id[dat$treatment == 1]))
+  )
+) %>%
+  kable(align = "lr", caption = "Dataset Structure Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Baseline Characteristics and Randomization Check
+
+```{r baseline-table, warning=false}
+#  Baseline summary by treatment arm 
+baseline <- dat %>% filter(month == 0)
+
+baseline %>%
+  group_by(treatment_f) %>%
+  summarise(
+    N = n(),
+    `Age — mean (SD)`        = paste0(round(mean(age_baseline), 1), " (",
+                                      round(sd(age_baseline),   1), ")"),
+    `Hemoglobin — mean (SD)` = paste0(round(mean(hemoglobin), 2), " (",
+                                      round(sd(hemoglobin),   2), ")"),
+    `Consistent ITN use (%)`  = paste0(round(mean(itn_use) * 100, 1), "%"),
+    .groups = "drop"
+  ) %>%
+  kable(
+    col.names = c("Treatment Arm", "N", "Age (months)",
+                  "Hemoglobin (g/dL)", "ITN Use (%)"),
+    align = "lcccc",
+    caption = "Baseline Characteristics by Treatment Group"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r randomization-tests, warning=false}
+#  Statistical tests for baseline balance 
+t_age   <- t.test(age_baseline ~ treatment, data = baseline)
+t_hb    <- t.test(hemoglobin  ~ treatment, data = baseline)
+chi_itn <- chisq.test(table(baseline$treatment_f, baseline$itn_use_f))
+
+tibble(
+  Variable = c("Age at baseline", "Hemoglobin at baseline", "ITN use"),
+  Test     = c("Two-sample t-test", "Two-sample t-test", "Chi-square test"),
+  `p-value` = round(c(t_age$p.value, t_hb$p.value, chi_itn$p.value), 3)
+) %>%
+  kable(align = "llc", caption = "Randomization Balance Tests") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Hemoglobin Distributions Over Time
+
+```{r boxplots}
+#  Boxplots by time point and treatment arm 
+ggplot(dat, aes(x = factor(month), y = hemoglobin, fill = treatment_f)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 1) +
+  scale_fill_manual(values = trt_colors, name = "Treatment") +
+  labs(
+    x = "Follow-up Month",
+    y = "Hemoglobin (g/dL)",
+    title = "Hemoglobin Distribution by Time Point and Treatment Arm"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+## Individual Trajectories (Spaghetti Plot)
+
+```{r spaghetti-plot, fig.height=6, warning=FALSE}
+#  Individual lines + LOESS mean overlay 
+ggplot(dat, aes(x = month, y = hemoglobin,
+                group = child_id, color = treatment_f)) +
+  geom_line(alpha = 0.15, linewidth = 0.3) +
+  geom_smooth(
+    aes(group = treatment_f),
+    method  = "loess",
+    se      = FALSE,
+    linewidth = 1.6,
+    formula = y ~ x
+  ) +
+  scale_color_manual(values = trt_colors, name = "Treatment") +
+  scale_x_continuous(breaks = c(0, 2, 4, 6)) +
+  labs(
+    x        = "Follow-up Month",
+    y        = "Hemoglobin (g/dL)",
+    title    = "Individual Hemoglobin Trajectories with LOESS Mean"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+## Mean Trajectories with 95% Confidence Bands
+
+```{r mean-trajectories}
+#  Observed group means ± 1.96 SE 
+mean_dat <- dat %>%
+  group_by(treatment_f, month) %>%
+  summarise(
+    mean_hb = mean(hemoglobin, na.rm = TRUE),
+    se_hb   = sd(hemoglobin,   na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot(mean_dat,
+       aes(x = month, y = mean_hb, color = treatment_f, fill = treatment_f)) +
+  geom_ribbon(
+    aes(ymin = mean_hb - 1.96 * se_hb,
+        ymax = mean_hb + 1.96 * se_hb),
+    alpha = 0.15, color = NA
+  ) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = trt_colors, name = "Treatment") +
+  scale_fill_manual( values = trt_colors, name = "Treatment") +
+  scale_x_continuous(breaks = c(0, 2, 4, 6)) +
+  labs(
+    x     = "Follow-up Month",
+    y     = "Mean Hemoglobin (g/dL)",
+    title = "Observed Mean Hemoglobin Trajectories with 95% Confidence Bands"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+
+
+# Model Building and Selection
+
+## Unconditional Means Model and ICC
+
+```{r null-model ,warning = false}
+# random intercept
+m0 <- lmer(hemoglobin ~ 1 + (1 | child_id), data = dat, REML = TRUE)
+summary(m0)
+vc0          <- as.data.frame(VarCorr(m0))
+var_child    <- vc0$vcov[1]
+var_residual <- vc0$vcov[2]
+icc_val      <- var_child / (var_child + var_residual)
+
+tibble(
+  Component              = c("Between-child variance (τ₀²)",
+                             "Within-child variance (σ²)",
+                             "Intraclass Correlation Coefficient (ICC)"),
+  Value = round(c(var_child, var_residual, icc_val), 3)
+) %>%
+  kable(align = "lr", caption = "Unconditional Means Model — Variance Components") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Fixed Effects Model Comparison
+
+```{r fixed-effects-models, warning=false}
+#add fixed effects (Model comparison)
+m1 <- lmer(hemoglobin ~ month + (1 | child_id),
+           data = dat, REML = FALSE)
+
+m2 <- lmer(hemoglobin ~ month + treatment_f + (1 | child_id),
+           data = dat, REML = FALSE)
+
+m3 <- lmer(hemoglobin ~ month + treatment_f + age_baseline + itn_use_f +
+             (1 | child_id),
+           data = dat, REML = FALSE)
+
+m4 <- lmer(hemoglobin ~ month * treatment_f + age_baseline + itn_use_f +
+             (1 | child_id),
+           data = dat, REML = FALSE)
+summary(m1)
+summary(m2)
+summary(m3)
+summary(m4)
+tibble(
+  Model  = c("M1: Month only",
+             "M2: + Treatment",
+             "M3: + Age + ITN use",
+             "M4: + Treatment × Month (interaction)"),
+  df     = c(attr(logLik(m1), "df"), attr(logLik(m2), "df"),
+             attr(logLik(m3), "df"), attr(logLik(m4), "df")),
+  AIC    = round(c(AIC(m1), AIC(m2), AIC(m3), AIC(m4)), 1),
+  BIC    = round(c(BIC(m1), BIC(m2), BIC(m3), BIC(m4)), 1),
+  logLik = round(c(as.numeric(logLik(m1)), as.numeric(logLik(m2)),
+                   as.numeric(logLik(m3)), as.numeric(logLik(m4))), 1)
+) %>%
+  kable(align = "lrrrr",
+        caption = "Fixed Effects Model Comparison (ML estimation)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(4, bold = TRUE, background = "#E8F8E8")
+```
+
+## Random Effects Structure Comparison
+
+```{r random-effects-comparison , warning=false}
+#  Random intercept only vs. random intercept + slope 
+m_ri  <- lmer(hemoglobin ~ month * treatment_f + age_baseline + itn_use_f +
+                (1 | child_id),
+              data = dat, REML = FALSE)
+
+m_ris <- lmer(hemoglobin ~ month * treatment_f + age_baseline + itn_use_f +
+                (1 + month | child_id),
+              data = dat, REML = FALSE)
+summary(m_ri)
+summary(m_ris)
+#  AIC/BIC comparison table 
+tibble(
+  Model  = c("Random Intercept Only",
+             "Random Intercept + Random Slope (month)"),
+  df     = c(attr(logLik(m_ri),  "df"), attr(logLik(m_ris), "df")),
+  AIC    = round(c(AIC(m_ri),    AIC(m_ris)), 1),
+  BIC    = round(c(BIC(m_ri),    BIC(m_ris)), 1),
+  logLik = round(c(as.numeric(logLik(m_ri)), as.numeric(logLik(m_ris))), 1)
+) %>%
+  kable(align = "lrrrr",
+        caption = "Random Effects Structure Comparison (ML estimation)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r lrt}
+#  Likelihood Ratio Test 
+lrt <- anova(m_ri, m_ris)
+lrt
+```
+
+## Final Model (REML)
+
+```{r final-model}
+# Final model
+m_final <- lmer(
+  hemoglobin ~ month * treatment_f + age_baseline + itn_use_f +
+    (1 + month | child_id),
+  data = dat, REML = TRUE
+)
+
+summary(m_final)
+```
+
+---
+
+# Model Diagnostics
+
+```{r diagnostics, fig.height=7}
+#   residuals and random effects
+resid_vals  <- residuals(m_final)
+fitted_vals <- fitted(m_final)
+re          <- ranef(m_final)$child_id
+
+#  Residuals vs Fitted 
+p1 <- ggplot(data.frame(fitted = fitted_vals, resid = resid_vals),
+             aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.25, size = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  geom_smooth(method = "loess", se = FALSE, color = "steelblue",
+              linewidth = 0.8, formula = y ~ x) +
+  labs(x = "Fitted Values", y = "Residuals",
+       title = "(A) Residuals vs. Fitted") +
+  theme_minimal(base_size = 11)
+
+# Q-Q — observation-level residuals 
+p2 <- ggplot(data.frame(resid = resid_vals), aes(sample = resid)) +
+  stat_qq(alpha = 0.3, size = 0.7) +
+  stat_qq_line(color = "red") +
+  labs(title = "(B) Q-Q Plot: Level-1 Residuals") +
+  theme_minimal(base_size = 11)
+
+# Q-Q — random intercepts 
+p3 <- ggplot(data.frame(intercept = re[, 1]), aes(sample = intercept)) +
+  stat_qq(alpha = 0.5) +
+  stat_qq_line(color = "red") +
+  labs(title = "(C) Q-Q Plot: Random Intercepts") +
+  theme_minimal(base_size = 11)
+
+#  Panel D: Q-Q — random slopes 
+p4 <- ggplot(data.frame(slope = re[, 2]), aes(sample = slope)) +
+  stat_qq(alpha = 0.5) +
+  stat_qq_line(color = "red") +
+  labs(title = "(D) Q-Q Plot: Random Slopes") +
+  theme_minimal(base_size = 11)
+
+(p1 + p2) / (p3 + p4)
+```
+
+
+
+# Confirmatory Analysis
+
+#Fixed Effects Results Table
+
+```{r results-table}
+#  table from the REML final model
+tidy_final <- tidy(
+  m_final,
+  effects = "fixed",
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+tidy_final %>%
+  mutate(
+    term = case_when(
+      term == "(Intercept)" ~ "Intercept",
+      term == "month" ~ "Month",
+      term == "treatment_fEnhanced SMC" ~ "Treatment (Enhanced vs. Standard)",
+      term == "age_baseline" ~ "Age at Baseline (months)",
+      term == "itn_use_fConsistent" ~ "ITN Use (Consistent vs. Inconsistent)",
+      term == "month:treatment_fEnhanced SMC" ~ "Month × Treatment (Interaction)",
+      TRUE ~ term
+    )
+  ) %>%
+  select(
+    Term = term,
+    Estimate = estimate,
+    SE = std.error,
+    `95% CI Lower` = conf.low,
+    `95% CI Upper` = conf.high,
+    `t-value` = statistic,
+    `p-value` = p.value
+  ) %>%
+  mutate(
+    across(Estimate:`t-value`, ~ round(., 3)),
+    `p-value` = ifelse(`p-value` < 0.001, "< 0.001",
+                       sprintf("%.4f", `p-value`))
+  ) %>%
+  kable(align = "lrrrrrr") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  ) %>%
+  row_spec(6, bold = TRUE, background = "#FFF9C4")
+```
+
+#Variance Components
+
+```{r variance-components , warning=false}
+#  Random effects variance components 
+vc_final <- as.data.frame(VarCorr(m_final))
+
+vc_final %>%
+  select(Group = grp, Effect = var1, Variance = vcov, SD = sdcor) %>%
+  mutate(
+    Group  = ifelse(Group == "child_id", "Child (Level 2)", "Residual (Level 1)"),
+    Effect = case_when(
+      Effect == "(Intercept)" ~ "Random Intercept",
+      Effect == "month"       ~ "Random Slope (Month)",
+      is.na(Effect)           ~ "Covariance",
+      TRUE                    ~ Effect
+    ),
+    Variance = round(Variance, 4),
+    SD       = round(SD,       4)
+  ) %>%
+  kable(
+    col.names = c("Level", "Random Effect", "Variance", "Std. Dev."),
+    align     = "llrr",
+    caption   = "Variance Components of the Final Linear Mixed Model"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+# Model-Based Predicted Trajectories
+
+```{r predicted-trajectories}
+#Fixed-effects predictions at mean covariate values 
+itn_ref <- names(sort(table(dat$itn_use_f), decreasing = TRUE))[1]
+
+pred_grid <- expand.grid(
+  month       = seq(0, 6, by = 0.5),
+  treatment_f = factor(c("Standard SMC", "Enhanced SMC"),
+                       levels = c("Standard SMC", "Enhanced SMC")),
+  age_baseline = mean(dat$age_baseline, na.rm = TRUE),
+  itn_use_f    = factor(itn_ref, levels = levels(dat$itn_use_f))
+)
+
+mm       <- model.matrix(~ month * treatment_f + age_baseline + itn_use_f,
+                         data = pred_grid)
+fe       <- fixef(m_final)
+pred_grid$pred  <- as.numeric(mm %*% fe)
+pred_se         <- sqrt(diag(mm %*% vcov(m_final) %*% t(mm)))
+pred_grid$lower <- pred_grid$pred - 1.96 * pred_se
+pred_grid$upper <- pred_grid$pred + 1.96 * pred_se
+
+#  Observed means for reference points 
+obs_means <- dat %>%
+  group_by(treatment_f, month) %>%
+  summarise(mean_hb = mean(hemoglobin, na.rm = TRUE), .groups = "drop")
+
+ggplot(pred_grid,
+       aes(x = month, y = pred, color = treatment_f, fill = treatment_f)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.3) +
+  geom_point(data   = obs_means,
+             aes(x  = month, y = mean_hb, color = treatment_f),
+             size   = 3, shape = 16, inherit.aes = FALSE) +
+  scale_color_manual(values = trt_colors, name = "Treatment") +
+  scale_fill_manual( values = trt_colors, name = "Treatment") +
+  scale_x_continuous(breaks = c(0, 2, 4, 6)) +
+  labs(
+    x        = "Follow-up Month",
+    y        = "Predicted Hemoglobin (g/dL)",
+    title    = "Model-Based Predicted Hemoglobin Trajectories",
+    subtitle = paste0("Adjusted for mean baseline age; ITN use = ", itn_ref,
+                      ". Points = observed group means.")
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+# Random Effects Distribution
+
+```{r random-effects-dist}
+# Histograms of child-level random intercepts and slopes 
+p_ri <- ggplot(data.frame(intercept = re[, 1]), aes(x = intercept)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, fill = "#3498DB", alpha = 0.6) +
+  geom_density(linewidth = 0.8) +
+  labs(x = "Random Intercept", y = "Density",
+       title = "(A) Random Intercepts") +
+  theme_minimal(base_size = 11)
+
+p_rs <- ggplot(data.frame(slope = re[, 2]), aes(x = slope)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, fill = "#E67E22", alpha = 0.6) +
+  geom_density(linewidth = 0.8) +
+  labs(x = "Random Slope (Month)", y = "Density",
+       title = "(B) Random Slopes") +
+  theme_minimal(base_size = 11)
+
+p_ri + p_rs
+```
